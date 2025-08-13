@@ -1,0 +1,267 @@
+name: 🤖 AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**/*.py'
+      - '**/*.js'
+      - '**/*.java'
+      - '**/*.cpp'
+      - '**/*.c'
+      - '**/*.ts'
+      - '**/*.jsx'
+      - '**/*.tsx'
+  push:
+    branches: [main, master, develop]
+    paths:
+      - '**/*.py'
+      - '**/*.js'
+      - '**/*.java'
+
+env:
+  MAX_FILES: 10
+  MAX_FILE_SIZE: 8000
+
+jobs:
+  ai-code-review:
+    runs-on: ubuntu-latest
+    name: AI Code Review Analysis
+    
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      
+      - name: 📦 Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+      
+      - name: 🔍 Detect Changed Files
+        id: changed-files
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            CHANGED_FILES=$(git diff --name-only $BASE_SHA..$HEAD_SHA)
+          else
+            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          fi
+          
+          # Filter for code files and limit count
+          REVIEW_FILES=$(echo "$CHANGED_FILES" | grep -E '\.(py|js|java|cpp|c|ts|jsx|tsx)$' | head -n ${{ env.MAX_FILES }} || true)
+          
+          echo "changed_files<<EOF" >> $GITHUB_OUTPUT
+          echo "$REVIEW_FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          FILE_COUNT=$(echo "$REVIEW_FILES" | grep -v '^$' | wc -l)
+          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+          
+          echo "📁 Found $FILE_COUNT files to review"
+      
+      - name: 🤖 AI Code Analysis
+        id: ai-analysis
+        env:
+          API_URL: ${{ secrets.AI_REVIEW_API_URL }}
+        run: |
+          python << 'EOF'
+          import os
+          import json
+          import requests
+          from datetime import datetime
+          
+          def analyze_files():
+              api_url = os.environ['API_URL']
+              changed_files = """${{ steps.changed-files.outputs.changed_files }}"""
+              
+              results = []
+              
+              # Create results header
+              results.append("# 🤖 AI Code Review Results\n")
+              results.append(f"**Generated:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
+              results.append(f"**Workflow:** ${{ github.workflow }}\n")
+              results.append(f"**Event:** ${{ github.event_name }}\n\n")
+              results.append("---\n\n")
+              
+              files_reviewed = 0
+              total_issues = 0
+              
+              for file_path in changed_files.strip().split('\n'):
+                  if not file_path.strip():
+                      continue
+                      
+                  if not os.path.exists(file_path):
+                      continue
+                      
+                  print(f"🔍 Analyzing: {file_path}")
+                  
+                  # Read file content
+                  try:
+                      with open(file_path, 'r', encoding='utf-8') as f:
+                          content = f.read()
+                  except Exception as e:
+                      print(f"❌ Error reading {file_path}: {e}")
+                      continue
+                  
+                  # Limit file size
+                  if len(content) > ${{ env.MAX_FILE_SIZE }}:
+                      content = content[:${{ env.MAX_FILE_SIZE }}]
+                      truncated = True
+                  else:
+                      truncated = False
+                  
+                  # Call AI API
+                  try:
+                      response = requests.post(
+                          f"{api_url}/review",
+                          json={"code_snippet": content},
+                          headers={"Content-Type": "application/json"},
+                          timeout=30
+                      )
+                      
+                      if response.status_code == 200:
+                          result = response.json()
+                          review_text = result.get('review', 'No review available')
+                          model_used = result.get('model_used', 'Unknown')
+                          
+                          # Count issues (simple heuristic)
+                          issue_keywords = ['bug', 'error', 'security', 'vulnerability', 'issue', 'problem']
+                          issues_found = sum(1 for keyword in issue_keywords if keyword.lower() in review_text.lower())
+                          total_issues += issues_found
+                          
+                          # Format result
+                          results.append(f"## 📄 `{file_path}`\n\n")
+                          results.append(f"**Model:** {model_used} | **Size:** {len(content)} chars")
+                          if truncated:
+                              results.append(" | **⚠️ Truncated**")
+                          results.append(f" | **Issues Detected:** {issues_found}\n\n")
+                          
+                          results.append("### 🔍 Analysis Results\n\n")
+                          results.append("```\n")
+                          results.append(review_text)
+                          results.append("\n```\n\n")
+                          results.append("---\n\n")
+                          
+                          files_reviewed += 1
+                          print(f"✅ Completed analysis of {file_path}")
+                          
+                      else:
+                          print(f"❌ API error for {file_path}: {response.status_code}")
+                          results.append(f"## ❌ `{file_path}` (Analysis Failed)\n\n")
+                          results.append(f"API request failed with status: {response.status_code}\n\n")
+                          results.append("---\n\n")
+                          
+                  except Exception as e:
+                      print(f"❌ Exception analyzing {file_path}: {e}")
+                      results.append(f"## ❌ `{file_path}` (Analysis Failed)\n\n")
+                      results.append(f"Error: {str(e)}\n\n")
+                      results.append("---\n\n")
+              
+              # Add summary
+              results.append("## 📊 Summary\n\n")
+              results.append(f"- **Files Analyzed:** {files_reviewed}\n")
+              results.append(f"- **Total Issues Detected:** {total_issues}\n")
+              results.append(f"- **Analysis Time:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n")
+              
+              if total_issues > 0:
+                  if total_issues >= 10:
+                      results.append("### 🚨 **HIGH PRIORITY**: Multiple issues detected. Please review carefully.\n\n")
+                  elif total_issues >= 5:
+                      results.append("### ⚠️ **MODERATE**: Several issues found. Consider addressing them.\n\n")
+                  else:
+                      results.append("### ✨ **LOW**: Few issues detected. Great job!\n\n")
+              else:
+                  results.append("### 🎉 **EXCELLENT**: No major issues detected!\n\n")
+              
+              results.append("---\n\n")
+              results.append("*🤖 This analysis was generated automatically using AI. Please apply human judgment for final decisions.*\n")
+              results.append("*⚡ Powered by AWS Bedrock & Amazon Titan*\n")
+              
+              # Save results
+              with open('ai_review_results.md', 'w') as f:
+                  f.write(''.join(results))
+              
+              # Set outputs
+              print(f"files_reviewed={files_reviewed}")
+              print(f"total_issues={total_issues}")
+              
+              # Write to GitHub outputs
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"files_reviewed={files_reviewed}\n")
+                  f.write(f"total_issues={total_issues}\n")
+                  f.write(f"status={'success' if files_reviewed > 0 else 'no_files'}\n")
+          
+          if __name__ == "__main__":
+              analyze_files()
+          EOF
+      
+      - name: 💬 Comment on Pull Request
+        if: github.event_name == 'pull_request' && steps.ai-analysis.outputs.files_reviewed > 0
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            try {
+              const reviewContent = fs.readFileSync('ai_review_results.md', 'utf8');
+              
+              // Find existing AI review comment
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+              });
+              
+              const botComment = comments.find(comment => 
+                comment.user.login === 'github-actions[bot]' && 
+                comment.body.includes('🤖 AI Code Review Results')
+              );
+              
+              const commentBody = reviewContent + `\n\n---\n**Workflow Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+              
+              if (botComment) {
+                // Update existing comment
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: botComment.id,
+                  body: commentBody
+                });
+                console.log('✅ Updated existing AI review comment');
+              } else {
+                // Create new comment
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: commentBody
+                });
+                console.log('✅ Created new AI review comment');
+              }
+            } catch (error) {
+              console.error('❌ Failed to post comment:', error);
+            }
+      
+      - name: 📁 Upload Review Results
+        if: always() && steps.ai-analysis.outputs.files_reviewed > 0
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-code-review-results-${{ github.run_number }}
+          path: ai_review_results.md
+          retention-days: 30
+      
+      - name: 📊 Summary
+        if: always()
+        run: |
+          echo "🎯 AI Code Review Completed!"
+          echo "📊 Files Reviewed: ${{ steps.ai-analysis.outputs.files_reviewed }}"
+          echo "🔍 Issues Found: ${{ steps.ai-analysis.outputs.total_issues }}"
+          echo "📄 Status: ${{ steps.ai-analysis.outputs.status }}"
